@@ -1,0 +1,191 @@
+#Initialization
+
+units metal
+atom_style full
+
+variable rmin  equal 6.
+variable rmax  equal 9.
+variable rcoul equal 9.
+
+pair_style hybrid/overlay coul/long ${rcoul} lj/cut ${rmax} lj/mdf ${rmin} ${rmax} buck/mdf ${rmin} ${rmax}
+
+kspace_style pppm 1.0e-5
+
+boundary p p p
+
+read_data %(co)s_%(ca)s.data
+
+
+# Atom defition
+# 1  C
+# 2  Ca
+# 3  Hw
+# 4  O
+# 5  Ow
+
+variable C4 equal 1 # C
+variable Ca equal 2 # Ca
+variable H2 equal 3 # Hw
+variable O4 equal 4 # O
+variable O2 equal 5 # Ow
+
+group surface type ${C4} ${O4} ${Ca}
+group water type ${H2} ${O2}
+
+# Charges
+set type ${O2}  charge  -0.820000
+set type ${H2}  charge  0.410000
+set type ${C4}  charge  1.123285
+set type ${O4}  charge -1.041095
+set type ${Ca}  charge  2.000000
+
+# Masses
+mass  ${O2}    15.999
+mass  ${H2}     1.010
+mass  ${C4}    12.010
+mass  ${O4}    15.999
+mass  ${Ca}    40.078
+
+# Pair coeffs
+pair_coeff       *       *             coul/long
+# Water - water interactions
+pair_coeff     ${O2}   ${O2} lj/cut 0.00674 3.165492
+pair_modify tail yes
+# Alkaline earths - water interactions
+pair_coeff ${Ca} ${O2} lj/mdf 0.00095 3.35
+# Carbonate - water interactions
+pair_coeff ${O4} ${O2} buck/mdf 12534.455133 0.202 0.
+pair_coeff ${H2} ${O4} buck/mdf 340. 0.217 0.
+pair_coeff ${O4} ${O4} buck/mdf 63840.199 0.198913 27.89901
+# Alkaline earths - carbonate interactions
+pair_coeff ${Ca} ${O4} buck/mdf   3161.6335 0.271511       0.
+
+special_bonds lj 0. 0.  0.  coul 0.  0.  0.0
+
+bond_style  harmonic
+# 1  C-O
+# 2  Hw-Ow
+
+#@ C4 - O4
+bond_coeff   1   20.424650      1.3042000
+#@ O2 - H2
+bond_coeff   2   22.965000      1.0120000
+
+angle_style hybrid class2 harmonic
+# 1  Hw-Ow-Hw
+# 2  O-C-O
+
+#@ H2 - O2 - H2
+angle_coeff   1 harmonic    1.6456800      113.24000
+#@ O4 - C4 - O4
+angle_coeff   2 class2 120.00000 6.6170000 0.0000000 0.0000000
+angle_coeff   2 class2 bb 12.818000 1.3042000 1.3042000
+angle_coeff   2 class2 ba 1.5331900 1.5331900 1.3042000 1.3042000
+
+improper_style distance
+#@  C4-O4-O4-O4
+improper_coeff   1     13.647000      360.00000
+
+neighbor 2.0 bin
+neigh_modify every 1 delay 0 check yes
+
+thermo 1000
+thermo_style custom step temp pe fmax press density vol
+thermo_modify flush yes
+
+#Making the defects
+group defect molecule 2048 2303 # CO3 vacancy in the middle and Ca vacancy in the corner, same slab surface
+delete_atoms group defect
+
+#Simulation variables
+variable minimizer string cg
+variable temperature equal 300.0
+variable tdamp equal 0.1
+variable dumpequil equal 10000
+variable nvtequil equal 100000
+variable nptequil equal 100000
+variable nvtequil2 equal 100000
+variable pressure equal 1.01325
+variable pdamp equal 1.0
+variable dumpprod equal 1000
+variable runprod equal 5000000
+
+shell sh seed.sh
+variable seed file rngs.txt
+
+balance 1.0 shift xyz 5 1.0
+
+#creating group for carbons that will be frozen
+variable cmz equal xcm(surface,z) #z coordinate of surface COM
+variable cmzlo equal ${cmz}-4.
+variable cmzhi equal ${cmz}+4.
+region center block INF INF INF INF ${cmzlo} ${cmzhi}
+group center region center
+group carbon type ${C4}
+group c_center intersect carbon center
+
+print '### Minimization ###'
+#dump em all custom 100 em.lammpstrj id element x y z
+#dump_modify em sort id flush yes element C Ca Hw O Ow
+min_style ${minimizer}
+minimize 0.0 1e-8 10000 10000
+write_data em.data
+#undump em
+reset_timestep 0
+
+print '### Creating initial velocities and fixing middle of slab ###'
+velocity all create 300 ${seed} loop local
+velocity c_center set 0. 0. 0.
+fix zero_force c_center setforce 0. 0. 0.
+
+timestep 0.001
+
+print '### Equilibration NVT 1 ###'
+
+fix nvt all nvt temp ${temperature} ${temperature} ${tdamp} tchain 5
+
+run ${nvtequil}
+
+write_data nvt.data
+unfix nvt
+reset_timestep 0
+
+print '### Equilibration NPT ###'
+
+fix npt all npt temp ${temperature} ${temperature} ${tdamp} z ${pressure} ${pressure} ${pdamp} tchain 5 pchain 5
+
+run ${nptequil}
+
+unfix npt
+reset_timestep 0
+
+write_data npt.data
+
+print '### Equilibration NVT ###'
+
+fix nvt all nvt temp ${temperature} ${temperature} ${tdamp} tchain 5
+
+run ${nvtequil2}
+
+write_data nvt2.data
+unfix nvt
+reset_timestep 0
+
+print '### Production NVT ###'
+
+fix nvt all nvt temp ${temperature} ${temperature} ${tdamp} tchain 5
+
+dump dumpnvt all atom/gz ${dumpprod} prod.lammpstrj.gz
+dump_modify dumpnvt sort id flush yes
+
+#dump dumpdcd all dcd ${dumpprod} prod.dcd
+
+# fix props all print 1000 "$(step) $(pe) $(press) $(temp) $(fmax) $(etotal) $(density) $(pxx) $(pyy) $(pzz) $(pxy) $(pxz) $(pyz) $(lx) $(ly) $(lz)" file prod.dat screen no title "1_step 2_pe 3_press 4_temp 5_fmax 6_etotal 7_density 8_pxx 9_pyy 10_pzz 11_pxy 12_pxz 13_pyz 14_lx 15_ly 16_lz"
+run ${runprod}
+
+write_data prod.data
+undump dumpnvt
+unfix nvt
+# unfix props
+
+reset_timestep 0
